@@ -1,0 +1,11 @@
+backend/venv/
+backend/data/rangeiq.db
+backend/data/training_data.csv
+backend/models/*.joblib
+frontend/node_modules/
+frontend/dist/
+.env
+__pycache__/
+*.pyc
+backend/app/data/
+backend/app/models/

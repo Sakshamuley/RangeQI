@@ -1,0 +1,20 @@
+model_name,battery_capacity_kwh,claimed_range_km,kerb_weight_kg,drag_coefficient,frontal_area_m2,motor_power_kw
+Tata Nexon EV Max,40.5,437,1400,0.32,2.35,105
+Tata Nexon EV,30.2,312,1400,0.32,2.35,95
+Tata Tiago EV,24.0,250,1235,0.33,2.20,55
+Tata Punch EV,35.0,421,1365,0.33,2.30,80
+MG Comet EV,17.3,230,1045,0.35,2.05,42
+MG ZS EV,50.3,461,1530,0.33,2.45,130
+MG Windsor EV,38.0,331,1740,0.34,2.55,134
+Hyundai Kona Electric,39.2,452,1685,0.29,2.40,100
+Hyundai Ioniq 5,72.6,631,1985,0.29,2.55,160
+Mahindra XUV400,39.4,456,1580,0.34,2.50,110
+Mahindra BE 6,59.0,557,2185,0.33,2.60,170
+BYD Atto 3,60.48,521,1750,0.29,2.45,150
+BYD Seal,82.56,650,2185,0.23,2.35,230
+Citroen eC3,29.2,320,1275,0.34,2.25,57
+Kia EV6,77.4,708,2055,0.28,2.50,168
+BMW iX1,64.7,531,2085,0.26,2.45,200
+Mercedes EQA 250+,66.5,560,2040,0.28,2.45,140
+Volvo XC40 Recharge,78.0,418,2188,0.32,2.50,150
+Tesla Model Y LR,75.0,533,2003,0.23,2.52,220

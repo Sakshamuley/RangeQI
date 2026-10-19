@@ -1,0 +1,52 @@
+{
+  "linear_regression": {
+    "mae": 34.055,
+    "rmse": 45.744,
+    "train_time_sec": 0.004,
+    "inference_time_ms": 0.0001
+  },
+  "random_forest": {
+    "mae": 24.018,
+    "rmse": 33.857,
+    "train_time_sec": 0.311,
+    "inference_time_ms": 0.025
+  },
+  "xgboost": {
+    "mae": 21.156,
+    "rmse": 28.966,
+    "train_time_sec": 0.524,
+    "inference_time_ms": 0.0013
+  },
+  "best_model": "xgboost",
+  "quantile_models": {
+    "p10": {
+      "mae": 39.755,
+      "train_time_sec": 4.36
+    },
+    "p50": {
+      "mae": 22.282,
+      "train_time_sec": 4.37
+    },
+    "p90": {
+      "mae": 39.171,
+      "train_time_sec": 3.531
+    }
+  },
+  "training_samples": 8000,
+  "feature_columns": [
+    "battery_capacity_kwh",
+    "kerb_weight_kg",
+    "drag_coefficient",
+    "frontal_area_m2",
+    "motor_power_kw",
+    "claimed_range_km",
+    "distance_km",
+    "avg_speed_kmh",
+    "elevation_gain_m",
+    "elevation_loss_m",
+    "temperature_c",
+    "num_passengers",
+    "driving_style",
+    "season"
+  ]
+}
