@@ -1,10 +1,9 @@
-"""FastAPI route handlers."""
+"""FastAPI route handlers — Phase 2 update."""
 
 from __future__ import annotations
 
 import json
 import logging
-import time
 from pathlib import Path
 from typing import Optional
 
@@ -14,6 +13,7 @@ from sqlalchemy.orm import Session
 from app.database import get_db
 from app.models import BODY_TYPES, EVModel, PredictionScan
 from app.schemas import EVModelOut, PredictRequest
+from app.services.route_service import get_full_route
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -27,19 +27,15 @@ VALIDATION_JSON = BACKEND_ROOT / "data" / "validation_results.json"
 
 @router.get("/ev-models", response_model=list[EVModelOut])
 def list_ev_models(
-    body_type: Optional[str] = Query(None, description="Filter by body type"),
-    price_min: Optional[float] = Query(None, ge=0, description="Min ex-showroom price (lakh)"),
-    price_max: Optional[float] = Query(None, ge=0, description="Max ex-showroom price (lakh)"),
-    seats_min: Optional[int] = Query(None, ge=1, description="Minimum seat count"),
+    body_type: Optional[str] = Query(None),
+    price_min: Optional[float] = Query(None, ge=0),
+    price_max: Optional[float] = Query(None, ge=0),
+    seats_min: Optional[int] = Query(None, ge=1),
     db: Session = Depends(get_db),
 ):
     """
     List EV models with optional filters.
-
-    Price filtering silently excludes EVs whose ex_showroom_price_lakh is NULL
-    and includes a `price_filter_warning` field in the response headers when
-    that happens.  Body type must be one of: hatchback, sedan, compact_suv,
-    suv, mpv.
+    NULL-price EVs are excluded from price-range filtering with a warning.
     """
     q = db.query(EVModel)
 
@@ -57,7 +53,6 @@ def list_ev_models(
 
     evs = q.order_by(EVModel.model_name).all()
 
-    # Price filtering — exclude NULLs, warn caller
     null_price_count = 0
     if price_min is not None or price_max is not None:
         filtered: list[EVModel] = []
@@ -73,7 +68,7 @@ def list_ev_models(
         evs = filtered
         if null_price_count:
             logger.warning(
-                "Price filter applied: %d EV(s) excluded because ex_showroom_price_lakh is NULL",
+                "Price filter: %d EV(s) excluded (ex_showroom_price_lakh is NULL)",
                 null_price_count,
             )
 
@@ -84,6 +79,38 @@ def list_ev_models(
 def list_body_types():
     """Return all supported EV body-type values."""
     return {"body_types": list(BODY_TYPES)}
+
+
+# ── Route + elevation + weather ───────────────────────────────────────────────
+
+@router.get("/route-elevation")
+async def route_elevation(
+    start_lat: float,
+    start_lon: float,
+    end_lat: float,
+    end_lon: float,
+    season: str = "summer",
+    db: Session = Depends(get_db),
+):
+    """
+    Fetch road geometry (OSRM), elevation (Open-Elevation batched POST)
+    and weather (OpenWeatherMap) for a source→destination pair.
+
+    Results are cached in the api_cache table by rounded coordinates.
+    Every fallback is returned as a flag + human-readable message.
+    """
+    result = await get_full_route(
+        start_lat, start_lon, end_lat, end_lon,
+        season=season,
+        db=db,
+    )
+    # gradient_segments are tuples — make JSON-serialisable
+    result = dict(result)
+    result["gradient_segments"] = [
+        {"gradient": g, "length_m": l}
+        for g, l in result.get("gradient_segments", [])
+    ]
+    return result
 
 
 # ── Benchmark / validation data ───────────────────────────────────────────────
@@ -138,29 +165,19 @@ def get_scan(scan_id: int, db: Session = Depends(get_db)):
     }
 
 
-# ── Predict (single-model mode) ───────────────────────────────────────────────
+# ── Predict / Recommend (stubs — implemented in Phases 3–6) ──────────────────
 
 @router.post("/predict")
 async def predict(req: PredictRequest, db: Session = Depends(get_db)):
-    """
-    Check specific EV model(s) against a route.
-    Full physics + ML pipeline.  Phases 2–6 will populate the physics details.
-    This stub returns a 501 until the simulator rewrite (Phase 3) is merged.
-    """
-    # TODO(Phase 2–6): implement full pipeline
+    """Single-model prediction.  Implemented fully in Phase 3."""
     raise HTTPException(
         501,
-        "POST /api/predict will be implemented in Phase 3. "
-        "Use POST /api/recommend (Phase 6) for production use.",
+        "POST /api/predict will be fully implemented after Phase 3 (physics rewrite). "
+        "Use POST /api/recommend after Phase 6 for production use.",
     )
 
 
-# ── Recommend ─────────────────────────────────────────────────────────────────
-
 @router.post("/recommend")
 async def recommend(db: Session = Depends(get_db)):
-    """
-    Ranked EV recommendation for a route + price/body-type filter.
-    Implemented in Phase 6.
-    """
+    """Ranked EV recommendation.  Implemented in Phase 6."""
     raise HTTPException(501, "POST /api/recommend will be implemented in Phase 6.")

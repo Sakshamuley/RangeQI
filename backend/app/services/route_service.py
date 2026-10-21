@@ -1,170 +1,151 @@
-"""External API integrations: elevation and weather with graceful fallbacks."""
+"""
+Route service — aggregates OSRM, elevation and weather into one call.
+
+This module is the single entry point for route data used by the
+prediction and recommendation pipelines (Phases 3 and 6).
+
+Every fallback is surfaced as a flag + human-readable message so the
+frontend can display a banner listing which data sources were unavailable.
+"""
 
 from __future__ import annotations
 
 import logging
-import math
-import os
-import time
 from typing import Any
 
-import httpx
+from app.services.osrm_service import (
+    SEGMENT_LENGTH_M,
+    fetch_osrm_route,
+    haversine_m,
+)
+from app.services.elevation_service import get_elevation_profile
+from app.services.weather_service import SEASON_TEMPS, fetch_temperature
 
 logger = logging.getLogger(__name__)
 
-OPEN_ELEVATION_URL = "https://api.open-elevation.com/api/v1/lookup"
-OPENWEATHER_URL = "https://api.openweathermap.org/data/2.5/weather"
-
-# Defaults when APIs fail — flat terrain, moderate Indian climate
-DEFAULT_ELEVATION_GAIN_M = 50.0
-DEFAULT_ELEVATION_LOSS_M = 50.0
-DEFAULT_TEMPERATURE_C = 30.0
-
-SEASON_TEMPS = {
-    "summer": 38.0,
-    "monsoon": 28.0,
-    "winter": 18.0,
-    "spring": 26.0,
-}
+# ── Cache TTLs ────────────────────────────────────────────────────────────────
+ROUTE_TTL_S = 86_400       # route geometry: 24 h
+ELEVATION_TTL_S = 86_400   # elevation: 24 h (terrain doesn't change)
+WEATHER_TTL_S = 1_800      # weather: 30 min
 
 
-def haversine_km(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
-    """Great-circle distance between two coordinates."""
-    r = 6371.0
-    p1, p2 = math.radians(lat1), math.radians(lat2)
-    dp = math.radians(lat2 - lat1)
-    dl = math.radians(lon2 - lon1)
-    a = math.sin(dp / 2) ** 2 + math.cos(p1) * math.cos(p2) * math.sin(dl / 2) ** 2
-    return 2 * r * math.asin(math.sqrt(a))
-
-
-def interpolate_route_points(
-    start_lat: float,
-    start_lon: float,
-    end_lat: float,
-    end_lon: float,
-    sample_km: float = 1.0,
-) -> list[dict[str, float]]:
-    """Sample points along straight-line route every ~sample_km."""
-    total_km = haversine_km(start_lat, start_lon, end_lat, end_lon)
-    if total_km < 0.5:
-        return [
-            {"latitude": start_lat, "longitude": start_lon},
-            {"latitude": end_lat, "longitude": end_lon},
-        ]
-    n = max(int(total_km / sample_km), 2)
-    points = []
-    for i in range(n + 1):
-        t = i / n
-        points.append(
-            {
-                "latitude": start_lat + t * (end_lat - start_lat),
-                "longitude": start_lon + t * (end_lon - start_lon),
-            }
-        )
-    return points
-
-
-async def fetch_elevation_profile(
-    start_lat: float,
-    start_lon: float,
-    end_lat: float,
-    end_lon: float,
+async def get_full_route(
+    lat1: float,
+    lon1: float,
+    lat2: float,
+    lon2: float,
+    season: str = "summer",
+    db: Any = None,
 ) -> dict[str, Any]:
     """
-    Fetch elevation via Open-Elevation API, sample every ~1 km.
-    On failure returns flat-terrain defaults and warning flag.
+    Fetch route geometry + elevation + weather for a source→destination pair.
+
+    Caches route and elevation results in the api_cache table when a
+    SQLAlchemy session (db) is supplied.
+
+    Returns:
+      distance_km, duration_s, avg_speed_kmh
+      elevation_gain_m, elevation_loss_m
+      start_elevation_m, end_elevation_m
+      temperature_c
+      waypoints        [{lat, lon}, ...]  at ~500 m intervals
+      profile          [{distance_km, elevation_m, gradient}, ...]
+      gradient_segments [(gradient, length_m), ...]
+      fallback_warnings list[str]  — empty when all APIs succeeded
+      route_fallback    bool
+      elevation_fallback bool
+      weather_fallback   bool
     """
-    t0 = time.perf_counter()
-    points = interpolate_route_points(start_lat, start_lon, end_lat, end_lon)
-    distance_km = haversine_km(start_lat, start_lon, end_lat, end_lon)
-    warning = None
-    profile: list[dict] = []
+    warnings: list[str] = []
 
-    try:
-        locations = "|".join(f"{p['latitude']},{p['longitude']}" for p in points)
-        async with httpx.AsyncClient(timeout=15.0) as client:
-            resp = await client.get(f"{OPEN_ELEVATION_URL}?locations={locations}")
-            resp.raise_for_status()
-            data = resp.json()
+    # ── 1. Route geometry (OSRM) ──────────────────────────────────────────────
+    route_result = await _cached_route(lat1, lon1, lat2, lon2, db)
+    if route_result["fallback"]:
+        warnings.append(route_result["fallback_reason"])
 
-        elevations = [r["elevation"] for r in data.get("results", [])]
-        if len(elevations) < 2:
-            raise ValueError("Insufficient elevation data")
+    waypoints = route_result["waypoints"]
 
-        gain, loss = 0.0, 0.0
-        for i in range(1, len(elevations)):
-            delta = elevations[i] - elevations[i - 1]
-            dist_frac = distance_km / max(len(elevations) - 1, 1)
-            profile.append(
-                {
-                    "distance_km": round(i * dist_frac, 2),
-                    "elevation_m": round(elevations[i], 1),
-                }
-            )
-            if delta > 0:
-                gain += delta
-            else:
-                loss += abs(delta)
+    # ── 2. Elevation (Open-Elevation batched POST) ────────────────────────────
+    elev_result = await _cached_elevation(lat1, lon1, lat2, lon2, waypoints, db)
+    if elev_result["elevation_fallback"]:
+        warnings.append(elev_result["elevation_fallback_reason"])
 
-        elapsed = time.perf_counter() - t0
-        return {
-            "distance_km": round(distance_km, 2),
-            "elevation_gain_m": round(gain, 1),
-            "elevation_loss_m": round(loss, 1),
-            "profile": profile,
-            "start_elevation_m": round(elevations[0], 1),
-            "end_elevation_m": round(elevations[-1], 1),
-            "api_used": True,
-            "warning": None,
-            "execution_time_ms": round(elapsed * 1000, 2),
-        }
-    except Exception as exc:
-        logger.warning("Open-Elevation API failed: %s — using defaults", exc)
-        warning = f"Elevation API unavailable ({exc}). Using flat-terrain estimate."
-        return {
-            "distance_km": round(distance_km, 2),
-            "elevation_gain_m": DEFAULT_ELEVATION_GAIN_M,
-            "elevation_loss_m": DEFAULT_ELEVATION_LOSS_M,
-            "profile": [],
-            "start_elevation_m": 200.0,
-            "end_elevation_m": 200.0,
-            "api_used": False,
-            "warning": warning,
-            "execution_time_ms": round((time.perf_counter() - t0) * 1000, 2),
-        }
+    # ── 3. Weather (OpenWeatherMap) ───────────────────────────────────────────
+    mid_lat = (lat1 + lat2) / 2
+    mid_lon = (lon1 + lon2) / 2
+    wx = await fetch_temperature(mid_lat, mid_lon, season)
+    if wx["fallback"]:
+        warnings.append(wx["fallback_reason"])
 
-
-async def fetch_temperature(lat: float, lon: float, season: str) -> dict[str, Any]:
-    """
-    Fetch current weather via OpenWeatherMap; fallback to season average.
-    Requires OPENWEATHER_API_KEY env var for live data.
-    """
-    t0 = time.perf_counter()
-    api_key = os.getenv("OPENWEATHER_API_KEY", "")
-
-    if api_key:
-        try:
-            async with httpx.AsyncClient(timeout=10.0) as client:
-                resp = await client.get(
-                    OPENWEATHER_URL,
-                    params={"lat": lat, "lon": lon, "appid": api_key, "units": "metric"},
-                )
-                resp.raise_for_status()
-                temp = resp.json()["main"]["temp"]
-                return {
-                    "temperature_c": round(float(temp), 1),
-                    "api_used": True,
-                    "warning": None,
-                    "execution_time_ms": round((time.perf_counter() - t0) * 1000, 2),
-                }
-        except Exception as exc:
-            logger.warning("OpenWeatherMap API failed: %s", exc)
-
-    temp = SEASON_TEMPS.get(season, DEFAULT_TEMPERATURE_C)
     return {
-        "temperature_c": temp,
-        "api_used": False,
-        "warning": "Weather API unavailable. Using season-average temperature.",
-        "execution_time_ms": round((time.perf_counter() - t0) * 1000, 2),
+        "distance_km": route_result["distance_km"],
+        "duration_s": route_result["duration_s"],
+        "avg_speed_kmh": route_result["avg_speed_kmh"],
+        "elevation_gain_m": elev_result["elevation_gain_m"],
+        "elevation_loss_m": elev_result["elevation_loss_m"],
+        "start_elevation_m": elev_result["start_elevation_m"],
+        "end_elevation_m": elev_result["end_elevation_m"],
+        "temperature_c": wx["temperature_c"],
+        "waypoints": waypoints,
+        "profile": elev_result["profile"],
+        "gradient_segments": elev_result["gradient_segments"],
+        "fallback_warnings": warnings,
+        "route_fallback": route_result["fallback"],
+        "elevation_fallback": elev_result["elevation_fallback"],
+        "weather_fallback": wx["fallback"],
     }
+
+
+# ── Cache wrappers ────────────────────────────────────────────────────────────
+
+async def _cached_route(
+    lat1: float, lon1: float,
+    lat2: float, lon2: float,
+    db: Any,
+) -> dict:
+    if db is not None:
+        from app.services.cache import cache_get, cache_set, make_key
+        key = make_key("osrm", lat1=round(lat1, 3), lon1=round(lon1, 3),
+                       lat2=round(lat2, 3), lon2=round(lon2, 3))
+        cached = cache_get(db, key)
+        if cached is not None:
+            return cached
+
+    result = await fetch_osrm_route(lat1, lon1, lat2, lon2)
+
+    if db is not None:
+        cache_set(db, key, result, ttl_seconds=ROUTE_TTL_S)
+
+    return result
+
+
+async def _cached_elevation(
+    lat1: float, lon1: float,
+    lat2: float, lon2: float,
+    waypoints: list[dict],
+    db: Any,
+) -> dict:
+    if db is not None:
+        from app.services.cache import cache_get, cache_set, make_key
+        key = make_key("elev", lat1=round(lat1, 3), lon1=round(lon1, 3),
+                       lat2=round(lat2, 3), lon2=round(lon2, 3),
+                       n=len(waypoints))
+        cached = cache_get(db, key)
+        if cached is not None:
+            return cached
+
+    result = await get_elevation_profile(waypoints, segment_m=SEGMENT_LENGTH_M)
+
+    if db is not None:
+        # gradient_segments contains tuples — serialize as lists
+        result_serializable = dict(result)
+        result_serializable["gradient_segments"] = [
+            list(t) for t in result["gradient_segments"]
+        ]
+        cache_set(db, key, result_serializable, ttl_seconds=ELEVATION_TTL_S)
+        # restore tuple form for the caller
+        result["gradient_segments"] = [
+            tuple(t) for t in result_serializable["gradient_segments"]
+        ]
+
+    return result
