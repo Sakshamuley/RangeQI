@@ -1,127 +1,264 @@
 {
-  "cases": 12,
-  "simulator_mae_km": 58.49,
-  "results": [
+  "scenario": {
+    "description": "50% city (avg 35 km/h, urban stops) + 50% highway (avg 80 km/h); flat road; 28 \u00b0C; 2 occupants; AC on",
+    "city_speed_kmh": 35.0,
+    "highway_speed_kmh": 80.0,
+    "city_fraction": 0.5,
+    "temperature_c": 28.0,
+    "num_passengers": 2,
+    "ac_on": true,
+    "elevation_gain_m": 0.0,
+    "elevation_loss_m": 0.0,
+    "distance_per_leg_km": 50.0
+  },
+  "calibration_params": {
+    "p_aux_kw": 1.0,
+    "eta_regen": 0.3,
+    "note": "Calibrated on 5 cases to minimise RMSE; Crr, eta_drive, HVAC parameters held fixed at prior nominals."
+  },
+  "calibration_set": {
+    "n": 5,
+    "cases": [
+      "MG Comet EV",
+      "Tata Curvv EV",
+      "Tata Harrier EV AWD",
+      "Tata Nexon EV 45 kWh",
+      "Tata Tiago EV 24 kWh"
+    ],
+    "mae_wh_per_km": 10.286,
+    "mape_pct": 9.194
+  },
+  "test_set": {
+    "n": 11,
+    "mae_wh_per_km": 12.995,
+    "mape_pct": 9.127
+  },
+  "all_cases_combined": {
+    "n": 16,
+    "mae_wh_per_km": 12.149,
+    "mape_pct": 9.148
+  },
+  "claimed_baseline": {
+    "mae_wh_per_km": 37.955,
+    "mape_pct": 25.141
+  },
+  "spearman_rank_correlation": {
+    "rho": 0.7412,
+    "p_value": 0.001018
+  },
+  "sensitivity": [
     {
-      "model": "Tata Nexon EV Max",
-      "source": "Autocar India long-term",
-      "claimed_km": 437,
-      "reported_km": 280,
-      "simulator_predicted_km": 306.7,
-      "simulator_error_km": 26.7,
-      "ml_predicted_km": 286.2,
-      "ml_error_km": 6.2
+      "label": "30% city / 70% highway",
+      "city_fraction": 0.3,
+      "mape_pct": 10.988,
+      "mae_wh_per_km": 13.866
     },
     {
-      "model": "MG ZS EV",
-      "source": "CarWale highway test",
-      "claimed_km": 461,
-      "reported_km": 340,
-      "simulator_predicted_km": 231.6,
-      "simulator_error_km": 108.4,
-      "ml_predicted_km": 248.1,
-      "ml_error_km": 91.9
+      "label": "50% city / 50% highway (baseline)",
+      "city_fraction": 0.5,
+      "mape_pct": 9.148,
+      "mae_wh_per_km": 12.149
     },
     {
-      "model": "Tata Tiago EV",
-      "source": "Team-BHP city commute",
-      "claimed_km": 250,
-      "reported_km": 195,
-      "simulator_predicted_km": 231.2,
-      "simulator_error_km": 36.2,
-      "ml_predicted_km": 242.0,
-      "ml_error_km": 47.0
-    },
-    {
-      "model": "Hyundai Kona Electric",
-      "source": "Autocar India",
-      "claimed_km": 452,
-      "reported_km": 305,
-      "simulator_predicted_km": 255.0,
-      "simulator_error_km": 50.0,
-      "ml_predicted_km": 244.3,
-      "ml_error_km": 60.7
-    },
-    {
-      "model": "Mahindra XUV400",
-      "source": "CarWale",
-      "claimed_km": 456,
-      "reported_km": 310,
-      "simulator_predicted_km": 238.7,
-      "simulator_error_km": 71.3,
-      "ml_predicted_km": 238.6,
-      "ml_error_km": 71.4
-    },
-    {
-      "model": "BYD Atto 3",
-      "source": "Overdrive",
-      "claimed_km": 521,
-      "reported_km": 380,
-      "simulator_predicted_km": 343.4,
-      "simulator_error_km": 36.6,
-      "ml_predicted_km": 341.7,
-      "ml_error_km": 38.3
-    },
-    {
-      "model": "Citroen eC3",
-      "source": "Autocar India",
-      "claimed_km": 320,
-      "reported_km": 220,
-      "simulator_predicted_km": 238.7,
-      "simulator_error_km": 18.7,
-      "ml_predicted_km": 232.1,
-      "ml_error_km": 12.1
-    },
-    {
-      "model": "Tata Punch EV",
-      "source": "Team-BHP",
-      "claimed_km": 421,
-      "reported_km": 290,
-      "simulator_predicted_km": 257.6,
-      "simulator_error_km": 32.4,
-      "ml_predicted_km": 255.7,
-      "ml_error_km": 34.3
-    },
-    {
-      "model": "Kia EV6",
-      "source": "CarWale highway",
-      "claimed_km": 708,
-      "reported_km": 480,
-      "simulator_predicted_km": 318.6,
-      "simulator_error_km": 161.4,
-      "ml_predicted_km": 322.2,
-      "ml_error_km": 157.8
-    },
-    {
-      "model": "MG Comet EV",
-      "source": "Autocar India",
-      "claimed_km": 230,
-      "reported_km": 165,
-      "simulator_predicted_km": 184.2,
-      "simulator_error_km": 19.2,
-      "ml_predicted_km": 199.3,
-      "ml_error_km": 34.3
-    },
-    {
-      "model": "Hyundai Ioniq 5",
-      "source": "Overdrive",
-      "claimed_km": 631,
-      "reported_km": 420,
-      "simulator_predicted_km": 350.4,
-      "simulator_error_km": 69.6,
-      "ml_predicted_km": 356.0,
-      "ml_error_km": 64.0
-    },
-    {
-      "model": "Mahindra BE 6",
-      "source": "CarWale",
-      "claimed_km": 557,
-      "reported_km": 360,
-      "simulator_predicted_km": 288.6,
-      "simulator_error_km": 71.4,
-      "ml_predicted_km": 300.3,
-      "ml_error_km": 59.7
+      "label": "70% city / 30% highway",
+      "city_fraction": 0.7,
+      "mape_pct": 10.342,
+      "mae_wh_per_km": 14.812
     }
   ],
-  "ml_mae_km": 56.48
+  "cross_check_gaadify": {
+    "source": "Gaadify Bengaluru test",
+    "source_url": "https://gaadify.com/tata-tiago-ev-24-kwh-real-world-range-test/",
+    "ev_name": "Tata Tiago EV 24 kWh",
+    "tested_km_approx": 185,
+    "measured_wh_per_km": 129.73,
+    "predicted_wh_per_km": 130.76,
+    "pct_error": 0.79,
+    "scenario": "40% city 35 km/h + 60% highway 80 km/h; 28\u00b0C estimated; 2 occupants + 20 kg luggage (luggage modelled as extra passenger weight \u2248 20 kg)",
+    "note": "Temperature and average speeds are not published; marked estimated. 20 kg luggage added to passenger mass (2\u00d775 + 20 = 170 kg total occupant load)."
+  },
+  "results": [
+    {
+      "ev_name": "MG Comet EV",
+      "set": "calibration",
+      "source_url": "https://www.autocarindia.com/auto-features/real-world-ev-range-tested-of-top-ev-cars-in-india-434105",
+      "data_verified": true,
+      "measured_wh_per_km": 89.5,
+      "predicted_wh_per_km": 116.54,
+      "pct_error": 30.21,
+      "claimed_wh_per_km": 75.22,
+      "claimed_pct_error": -15.96
+    },
+    {
+      "ev_name": "Tata Tiago EV 24 kWh",
+      "set": "calibration",
+      "source_url": "https://www.autocarindia.com/auto-features/real-world-ev-range-tested-of-top-ev-cars-in-india-434105",
+      "data_verified": true,
+      "measured_wh_per_km": 128.7,
+      "predicted_wh_per_km": 125.65,
+      "pct_error": -2.37,
+      "claimed_wh_per_km": 87.27,
+      "claimed_pct_error": -32.19
+    },
+    {
+      "ev_name": "Tata Nexon EV 45 kWh",
+      "set": "calibration",
+      "source_url": "https://www.autocarindia.com/auto-features/real-world-ev-range-tested-of-top-ev-cars-in-india-434105",
+      "data_verified": true,
+      "measured_wh_per_km": 128.4,
+      "predicted_wh_per_km": 134.99,
+      "pct_error": 5.13,
+      "claimed_wh_per_km": 92.02,
+      "claimed_pct_error": -28.33
+    },
+    {
+      "ev_name": "Tata Curvv EV",
+      "set": "calibration",
+      "source_url": "https://www.autocarindia.com/auto-features/real-world-ev-range-tested-of-top-ev-cars-in-india-434105",
+      "data_verified": true,
+      "measured_wh_per_km": 150.6,
+      "predicted_wh_per_km": 147.71,
+      "pct_error": -1.92,
+      "claimed_wh_per_km": 109.56,
+      "claimed_pct_error": -27.25
+    },
+    {
+      "ev_name": "Tata Harrier EV AWD",
+      "set": "calibration",
+      "source_url": "https://www.autocarindia.com/auto-features/real-world-ev-range-tested-of-top-ev-cars-in-india-434105",
+      "data_verified": true,
+      "measured_wh_per_km": 187.0,
+      "predicted_wh_per_km": 175.14,
+      "pct_error": -6.34,
+      "claimed_wh_per_km": 120.58,
+      "claimed_pct_error": -35.52
+    },
+    {
+      "ev_name": "Tata Tigor EV",
+      "set": "test",
+      "source_url": "https://www.autocarindia.com/auto-features/real-world-ev-range-tested-of-top-ev-cars-in-india-434105",
+      "data_verified": true,
+      "measured_wh_per_km": 137.2,
+      "predicted_wh_per_km": 126.57,
+      "pct_error": -7.75,
+      "claimed_wh_per_km": 82.54,
+      "claimed_pct_error": -39.84
+    },
+    {
+      "ev_name": "Citroen eC3",
+      "set": "test",
+      "source_url": "https://www.autocarindia.com/auto-features/real-world-ev-range-tested-of-top-ev-cars-in-india-434105",
+      "data_verified": true,
+      "measured_wh_per_km": 128.2,
+      "predicted_wh_per_km": 129.51,
+      "pct_error": 1.02,
+      "claimed_wh_per_km": 118.7,
+      "claimed_pct_error": -7.41
+    },
+    {
+      "ev_name": "MG Windsor EV",
+      "set": "test",
+      "source_url": "https://www.autocarindia.com/auto-features/real-world-ev-range-tested-of-top-ev-cars-in-india-434105",
+      "data_verified": true,
+      "measured_wh_per_km": 123.5,
+      "predicted_wh_per_km": 156.04,
+      "pct_error": 26.35,
+      "claimed_wh_per_km": 114.46,
+      "claimed_pct_error": -7.32
+    },
+    {
+      "ev_name": "Tata Nexon EV 40.5 kWh",
+      "set": "test",
+      "source_url": "https://www.autocarindia.com/auto-features/real-world-ev-range-tested-of-top-ev-cars-in-india-434105",
+      "data_verified": true,
+      "measured_wh_per_km": 147.1,
+      "predicted_wh_per_km": 134.54,
+      "pct_error": -8.54,
+      "claimed_wh_per_km": 103.85,
+      "claimed_pct_error": -29.4
+    },
+    {
+      "ev_name": "MG ZS EV",
+      "set": "test",
+      "source_url": "https://www.autocarindia.com/auto-features/real-world-ev-range-tested-of-top-ev-cars-in-india-434105",
+      "data_verified": true,
+      "measured_wh_per_km": 149.3,
+      "predicted_wh_per_km": 143.41,
+      "pct_error": -3.94,
+      "claimed_wh_per_km": 109.11,
+      "claimed_pct_error": -26.92
+    },
+    {
+      "ev_name": "Hyundai Creta Electric LR",
+      "set": "test",
+      "source_url": "https://www.autocarindia.com/auto-features/real-world-ev-range-tested-of-top-ev-cars-in-india-434105",
+      "data_verified": true,
+      "measured_wh_per_km": 119.0,
+      "predicted_wh_per_km": 139.27,
+      "pct_error": 17.04,
+      "claimed_wh_per_km": 108.67,
+      "claimed_pct_error": -8.68
+    },
+    {
+      "ev_name": "Kia Carens Clavis EV",
+      "set": "test",
+      "source_url": "https://www.autocarindia.com/auto-features/real-world-ev-range-tested-of-top-ev-cars-in-india-434105",
+      "data_verified": true,
+      "measured_wh_per_km": 141.2,
+      "predicted_wh_per_km": 152.93,
+      "pct_error": 8.31,
+      "claimed_wh_per_km": 104.9,
+      "claimed_pct_error": -25.71
+    },
+    {
+      "ev_name": "VinFast VF7 AWD",
+      "set": "test",
+      "source_url": "https://www.autocarindia.com/auto-features/real-world-ev-range-tested-of-top-ev-cars-in-india-434105",
+      "data_verified": true,
+      "measured_wh_per_km": 181.5,
+      "predicted_wh_per_km": 163.39,
+      "pct_error": -9.98,
+      "claimed_wh_per_km": 138.82,
+      "claimed_pct_error": -23.51
+    },
+    {
+      "ev_name": "Mahindra BE 6",
+      "set": "test",
+      "source_url": "https://www.autocarindia.com/auto-features/real-world-ev-range-tested-of-top-ev-cars-in-india-434105",
+      "data_verified": true,
+      "measured_wh_per_km": 176.1,
+      "predicted_wh_per_km": 160.69,
+      "pct_error": -8.75,
+      "claimed_wh_per_km": 115.84,
+      "claimed_pct_error": -34.22
+    },
+    {
+      "ev_name": "Mahindra XEV 9e",
+      "set": "test",
+      "source_url": "https://www.autocarindia.com/auto-features/real-world-ev-range-tested-of-top-ev-cars-in-india-434105",
+      "data_verified": true,
+      "measured_wh_per_km": 173.0,
+      "predicted_wh_per_km": 170.91,
+      "pct_error": -1.21,
+      "claimed_wh_per_km": 120.43,
+      "claimed_pct_error": -30.39
+    },
+    {
+      "ev_name": "Mahindra XEV 9S",
+      "set": "test",
+      "source_url": "https://www.autocarindia.com/auto-features/real-world-ev-range-tested-of-top-ev-cars-in-india-434105",
+      "data_verified": true,
+      "measured_wh_per_km": 165.3,
+      "predicted_wh_per_km": 177.71,
+      "pct_error": 7.51,
+      "claimed_wh_per_km": 116.35,
+      "claimed_pct_error": -29.61
+    }
+  ],
+  "notes": [
+    "Validation target is Wh/km (= 1000 / km_per_kWh published by Autocar India).",
+    "Test conditions for Autocar tests: Mumbai city+highway weekday loop, 2 occupants, AC auto 22\u00b0C, regen set per road type, fully charged. Average speed, ambient temperature and elevation are NOT published and are marked 'estimated' in validation_cases.csv.",
+    "The physics model is trained on simulated data only (Phase 5). Errors against road tests reflect assumed parameter uncertainty.",
+    "Luggage in the Gaadify cross-check (20 kg) is added to occupant mass as a direct mass increase (conservative: no change in Cd or CdA)."
+  ]
 }

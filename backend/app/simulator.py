@@ -195,6 +195,7 @@ def simulate_energy(
     num_passengers: int = 1,
     ac_on: bool = True,
     altitude_m: float = 0.0,
+    luggage_kg: float = 0.0,
     config: PhysicsConfig | None = None,
 ) -> EnergyBreakdown:
     """
@@ -214,7 +215,7 @@ def simulate_energy(
     v_kmh = avg_speed_kmh * speed_factor
     v_mps = max(v_kmh / 3.6, 0.5)   # guard against zero
 
-    total_mass_kg = ev.kerb_weight_kg + num_passengers * 75.0
+    total_mass_kg = ev.kerb_weight_kg + num_passengers * 75.0 + luggage_kg
     rho = air_density_kg_m3(temperature_c, altitude_m)
     CdA = ev.drag_coefficient * ev.frontal_area_m2
 
@@ -350,6 +351,7 @@ def simulate_energy_simple(
     num_passengers: int = 1,
     ac_on: bool = True,
     altitude_m: float = 0.0,
+    luggage_kg: float = 0.0,
     config: PhysicsConfig | None = None,
 ) -> EnergyBreakdown:
     """
@@ -365,5 +367,6 @@ def simulate_energy_simple(
         num_passengers=num_passengers,
         ac_on=ac_on,
         altitude_m=altitude_m,
+        luggage_kg=luggage_kg,
         config=config,
     )
