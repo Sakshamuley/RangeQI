@@ -1,243 +1,369 @@
 """
-Physics-informed EV energy consumption simulator.
+Segment-based physics model for EV energy consumption.
 
-Formulas follow standard automotive energy modeling literature:
-- SAE J1634 / EPA UDDS-style decomposition of traction energy
-- Rolling resistance: F_rr = C_rr * m * g  (typical C_rr ~ 0.01 for EV tires)
-- Aerodynamic drag: F_aero = 0.5 * rho * Cd * A * v^2
-- Gravitational potential: E = m * g * h
-- Regenerative braking recovers a fraction of descent energy
+Theory — per segment i with length L (m), gradient θ (rad), speed v (m/s):
 
-Reference: Redelbach et al., "Energy consumption estimation for electric vehicles"
-           IEEE Trans. Intelligent Transportation Systems; also standard texts
-           on vehicle longitudinal dynamics (Gillespie, "Fundamentals of Vehicle Dynamics").
+  F_aero    = 0.5 · ρ · Cd · A · (v + v_wind)²          [N]
+  F_rolling = Crr · m · g · cos(θ)                        [N]  [FAR16]
+  F_grade   = m · g · sin(θ)                              [N]  [G92]
+  F_total   = F_aero + F_rolling + F_grade
+
+  P_wheel = F_total · v                                    [W]
+  P_battery = P_wheel / η_drive    if P_wheel ≥ 0  (driving)
+              P_wheel · η_regen    if P_wheel < 0  (regen)  [FAR16]
+  plus: P_aux (constant auxiliary) + P_hvac(T_ambient)    [YM15]
+
+  E_segment = (P_battery + P_aux + P_hvac) · (L / v)     [J]
+
+Air density is computed from ambient temperature + altitude via the
+ISA barometric formula (ideal gas law approximation).
+
+HVAC direction per Yuksel & Michalek 2015 [YM15]:
+  heating below ~15 °C → reduces range
+  cooling above ~28 °C → reduces range
+
+Stop-and-go correction (urban cycles):
+  KE_per_stop = 0.5 · m · v² · inertia_factor
+  E_stop_net  = n_stops · KE_per_stop · (1 − η_regen) / η_drive
+
+No range clamps are applied.  Range = usable_battery_kwh / (Wh/km × 10⁻³).
+
+References:
+  [FAR16] Fiori, Ahn & Rakha 2016, Appl. Energy 168
+  [DF21]  Dollinger & Fischerauer 2021, Energies 14(18) 5804
+  [G92]   Gillespie, "Fundamentals of Vehicle Dynamics"
+  [ARAI]  ARAI AIS-040 (MIDC test cycle)
+  [YM15]  Yuksel & Michalek 2015 (temperature effect on EV range)
 """
 
 from __future__ import annotations
 
-import logging
-from dataclasses import dataclass
+import math
+from dataclasses import dataclass, field
 from typing import Literal
 
-import numpy as np
+from app.physics_config import DEFAULT_CONFIG, PhysicsConfig
 
-logger = logging.getLogger(__name__)
-
-# Physical constants
-RHO_AIR = 1.225  # kg/m³ at sea level, ~15°C
-G = 9.81  # m/s²
-C_ROLLING = 0.011  # dimensionless rolling resistance coefficient (EV tires)
-MOTOR_EFFICIENCY = 0.92  # typical inverter + motor efficiency
-REGEN_EFFICIENCY = 0.65  # fraction of descent energy recovered to battery
-HVAC_BASE_KW = 1.5  # baseline HVAC draw at moderate temps
-HVAC_EXTREME_KW = 3.5  # extra draw in hot/cold extremes
+G = 9.81        # m/s²
+R_AIR = 287.05  # J/(kg·K) — specific gas constant for dry air
 
 DrivingStyle = Literal["aggressive", "normal", "calm"]
 
-DRIVING_STYLE_MULTIPLIER: dict[DrivingStyle, float] = {
-    "aggressive": 1.18,  # hard acceleration, high regen braking variance
-    "normal": 1.0,
-    "calm": 0.90,  # eco driving, anticipatory braking
+# Speed factor: scales avg_speed, affecting aero (v²) and time-based loads.
+# Justification: aggressive drivers choose higher speeds; calm drivers ease off.
+STYLE_SPEED_FACTOR: dict[DrivingStyle, float] = {
+    "aggressive": 1.10,
+    "normal":     1.00,
+    "calm":       0.92,
+}
+# Acceleration factor: scales effective acceleration for stop-and-go events.
+STYLE_ACCEL_FACTOR: dict[DrivingStyle, float] = {
+    "aggressive": 1.50,  # harder acceleration between stops → more inertia energy
+    "normal":     1.00,
+    "calm":       0.70,  # anticipatory braking, softer re-acceleration
 }
 
 
+# ── Data types ────────────────────────────────────────────────────────────────
+
 @dataclass
 class EVSpecs:
-    battery_capacity_kwh: float
+    """
+    EV physics parameters required by the energy model.
+    Use usable_battery_kwh for range calculation (not nominal battery_capacity_kwh).
+    """
+    battery_capacity_kwh: float        # nominal (gross) kWh
+    usable_battery_kwh: float          # net usable kWh (default 0.95 × nominal)
     kerb_weight_kg: float
-    drag_coefficient: float
-    frontal_area_m2: float
+    drag_coefficient: float            # Cd
+    frontal_area_m2: float             # A
     motor_power_kw: float
-    claimed_range_km: float = 0.0
+
+    @classmethod
+    def from_ev_model(cls, ev) -> "EVSpecs":
+        """Build EVSpecs from a SQLAlchemy EVModel row."""
+        usable = ev.usable_battery_kwh or ev.battery_capacity_kwh * 0.95
+        return cls(
+            battery_capacity_kwh=ev.battery_capacity_kwh,
+            usable_battery_kwh=usable,
+            kerb_weight_kg=ev.kerb_weight_kg,
+            drag_coefficient=ev.drag_coefficient,
+            frontal_area_m2=ev.frontal_area_m2,
+            motor_power_kw=ev.motor_power_kw,
+        )
 
 
 @dataclass
-class TripConditions:
-    distance_km: float
-    avg_speed_kmh: float
-    elevation_gain_m: float
-    elevation_loss_m: float
-    temperature_c: float
-    driving_style: DrivingStyle = "normal"
-    num_passengers: int = 1
+class SegmentData:
+    """One road segment from OSRM geometry interpolation (Phase 2)."""
+    gradient: float   # dimensionless (positive = uphill): Δelev / distance
+    length_m: float   # metres
 
 
 @dataclass
 class EnergyBreakdown:
-    """Per-term energy consumption in kWh for one trip."""
-    base_consumption_kwh: float
-    aero_drag_kwh: float
-    rolling_resistance_kwh: float
-    elevation_gain_kwh: float
-    regen_recovery_kwh: float  # negative = energy returned
-    hvac_kwh: float
-    style_multiplier: float
-    noise_kwh: float
-    total_energy_kwh: float
+    """
+    Per-term energy consumption in Wh/km, summed over the full trip.
+
+    regen_wh_per_km is always ≤ 0 (energy returned to battery).
+    gradient_wh_per_km is positive uphill, negative downhill (before regen).
+    total_wh_per_km = aero + rolling + gradient + inertia + regen + auxiliary + hvac
+    """
+    aero_wh_per_km: float
+    rolling_wh_per_km: float
+    gradient_wh_per_km: float
+    inertia_wh_per_km: float
+    regen_wh_per_km: float
+    auxiliary_wh_per_km: float
+    hvac_wh_per_km: float
+    total_wh_per_km: float
+    total_trip_wh: float
+    trip_distance_km: float
 
 
-def base_consumption_term(
-    motor_efficiency: float,
-    weight_kg: float,
-    distance_km: float,
+# ── Physical sub-models ───────────────────────────────────────────────────────
+
+def air_density_kg_m3(temp_c: float, altitude_m: float = 0.0) -> float:
+    """
+    Air density from ambient temperature and altitude.
+    Uses the ISA barometric pressure formula (troposphere).
+    """
+    T_K = temp_c + 273.15
+    # ISA pressure at altitude (valid to ~11 km)
+    P_Pa = 101_325.0 * (1.0 - 2.2557e-5 * altitude_m) ** 5.2559
+    return P_Pa / (R_AIR * T_K)
+
+
+def hvac_power_kw(
+    ambient_c: float,
+    cfg: PhysicsConfig = DEFAULT_CONFIG,
 ) -> float:
     """
-    Parasitic/auxiliary + drivetrain overhead scaled with mass and distance.
-    Heavier vehicles need more energy for ancillary systems and inertia management.
+    HVAC power draw as a function of ambient temperature.
+
+    Heating regime (< hvac_heat_threshold_c):
+      Resistive heater or heat pump; power increases with cold severity.
+      Direction: lower T → higher load → less range  [YM15]
+
+    Cooling regime (> hvac_cool_threshold_c):
+      AC compressor; power increases with heat severity.
+      Direction: higher T → higher load → less range  [YM15]
+
+    Magnitudes are assumed (see ASSUMPTIONS.md).
     """
-    # ~0.02 kWh/km baseline at reference mass 1400 kg, adjusted by efficiency
-    ref_mass = 1400.0
-    kwh_per_km = 0.02 * (weight_kg / ref_mass) / motor_efficiency
-    return kwh_per_km * distance_km
+    if ambient_c < cfg.hvac_heat_threshold_c:
+        delta = cfg.hvac_heat_threshold_c - ambient_c
+        return min(
+            cfg.hvac_base_kw + delta * cfg.hvac_heat_coef_kw_per_c,
+            cfg.hvac_max_heat_kw,
+        )
+    if ambient_c > cfg.hvac_cool_threshold_c:
+        delta = ambient_c - cfg.hvac_cool_threshold_c
+        return min(
+            cfg.hvac_base_kw + delta * cfg.hvac_cool_coef_kw_per_c,
+            cfg.hvac_max_cool_kw,
+        )
+    return cfg.hvac_base_kw  # comfort zone — fan only
 
 
-def aero_drag_term(
-    speed_kmh: float,
-    drag_coefficient: float,
-    frontal_area_m2: float,
-    distance_km: float,
-) -> float:
-    """
-    Aerodynamic drag power ~ v^3 integrated over time.
-    E_aero = (0.5 * rho * Cd * A * v^2) * distance / efficiency
-    Uses average speed as proxy for constant-speed cruise segment.
-    """
-    v_ms = max(speed_kmh, 5.0) / 3.6
-    force_n = 0.5 * RHO_AIR * drag_coefficient * frontal_area_m2 * v_ms**2
-    energy_j = force_n * (distance_km * 1000)
-    return (energy_j / MOTOR_EFFICIENCY) / 3_600_000  # J -> kWh
+def _road_class(speed_kmh: float, cfg: PhysicsConfig) -> str:
+    """Classify road type from average speed."""
+    if speed_kmh < cfg.urban_speed_threshold_kmh:
+        return "urban"
+    if speed_kmh < cfg.highway_speed_threshold_kmh:
+        return "mixed"
+    return "highway"
 
 
-def rolling_resistance_term(weight_kg: float, distance_km: float) -> float:
-    """
-    F_rr = C_rr * m * g; energy = F * d / efficiency.
-    Dominates at city speeds; proportional to weight and distance.
-    """
-    force_n = C_ROLLING * weight_kg * G
-    energy_j = force_n * (distance_km * 1000)
-    return (energy_j / MOTOR_EFFICIENCY) / 3_600_000
+def _stops_per_km(speed_kmh: float, cfg: PhysicsConfig) -> float:
+    rc = _road_class(speed_kmh, cfg)
+    return {
+        "urban":   cfg.stops_per_km_urban,
+        "mixed":   cfg.stops_per_km_mixed,
+        "highway": cfg.stops_per_km_highway,
+    }[rc]
 
 
-def elevation_gain_term(weight_kg: float, elevation_gain_m: float) -> float:
-    """
-    Potential energy to climb: E = m * g * h / efficiency.
-    Only positive gain consumes net energy.
-    """
-    if elevation_gain_m <= 0:
-        return 0.0
-    energy_j = weight_kg * G * elevation_gain_m
-    return (energy_j / MOTOR_EFFICIENCY) / 3_600_000
+# ── Core simulator ────────────────────────────────────────────────────────────
 
-
-def regen_recovery_term(weight_kg: float, elevation_loss_m: float) -> float:
-    """
-    Descent recovers energy via regen braking: E_regen = m * g * h * eta_regen.
-    Returned as positive kWh subtracted from total consumption.
-    """
-    if elevation_loss_m <= 0:
-        return 0.0
-    energy_j = weight_kg * G * elevation_loss_m * REGEN_EFFICIENCY
-    return energy_j / 3_600_000
-
-
-def hvac_term(temperature_c: float, trip_duration_min: float) -> float:
-    """
-    Cabin thermal load depends on ambient temperature deviation from comfort (22°C).
-    Hot Indian summers and cold hill-station mornings increase HVAC draw.
-    """
-    comfort_c = 22.0
-    delta = abs(temperature_c - comfort_c)
-    if delta < 5:
-        power_kw = HVAC_BASE_KW * 0.3
-    elif delta < 15:
-        power_kw = HVAC_BASE_KW
-    else:
-        power_kw = HVAC_EXTREME_KW
-    return power_kw * (trip_duration_min / 60.0)
-
-
-def simulate_trip_energy(
+def simulate_energy(
     ev: EVSpecs,
-    trip: TripConditions,
-    *,
-    add_noise: bool = True,
-    rng: np.random.Generator | None = None,
+    segments: list[SegmentData],
+    avg_speed_kmh: float,
+    temperature_c: float,
+    driving_style: DrivingStyle = "normal",
+    num_passengers: int = 1,
+    ac_on: bool = True,
+    altitude_m: float = 0.0,
+    config: PhysicsConfig | None = None,
 ) -> EnergyBreakdown:
     """
-    Full physics-based energy model for a single trip.
+    Segment-based energy model.  No range clamps are applied here.
 
-    energy_kwh = base + aero + rolling + elevation_gain
-                 - regen_recovery + hvac
-    Then multiplied by driving_style_multiplier.
-    Optional Gaussian noise captures real-world variability (traffic, wind, etc.).
+    Parameters
+    ----------
+    segments    : road geometry from OSRM (Phase 2), each with gradient and length
+    avg_speed_kmh : overall average speed (scaled by driving style)
+    altitude_m  : mean altitude for air-density correction (0 = sea level)
+    config      : PhysicsConfig; uses DEFAULT_CONFIG when None
     """
-    rng = rng or np.random.default_rng()
+    cfg = config or DEFAULT_CONFIG
 
-    total_weight = ev.kerb_weight_kg + max(trip.num_passengers - 1, 0) * 75.0
-    duration_min = (trip.distance_km / max(trip.avg_speed_kmh, 10.0)) * 60.0
+    speed_factor = STYLE_SPEED_FACTOR[driving_style]
+    accel_factor = STYLE_ACCEL_FACTOR[driving_style]
+    v_kmh = avg_speed_kmh * speed_factor
+    v_mps = max(v_kmh / 3.6, 0.5)   # guard against zero
 
-    base = base_consumption_term(MOTOR_EFFICIENCY, total_weight, trip.distance_km)
-    aero = aero_drag_term(
-        trip.avg_speed_kmh, ev.drag_coefficient, ev.frontal_area_m2, trip.distance_km
+    total_mass_kg = ev.kerb_weight_kg + num_passengers * 75.0
+    rho = air_density_kg_m3(temperature_c, altitude_m)
+    CdA = ev.drag_coefficient * ev.frontal_area_m2
+
+    p_hvac_kw = hvac_power_kw(temperature_c, cfg) if ac_on else 0.0
+    p_aux_kw = cfg.p_aux_kw
+
+    # Joule accumulators (positive = energy consumed from battery)
+    J_aero = 0.0
+    J_roll = 0.0
+    J_grade = 0.0   # positive uphill, negative downhill-with-drive
+    J_regen = 0.0   # always ≤ 0
+    J_aux = 0.0
+    J_hvac = 0.0
+
+    for seg in segments:
+        L = seg.length_m
+        if L <= 0.0:
+            continue
+        theta = math.atan(seg.gradient)   # convert grade to angle
+        t_s = L / v_mps                   # time to traverse segment (s)
+
+        F_aero = 0.5 * rho * CdA * (v_mps + cfg.v_wind_mps) ** 2
+        F_roll = cfg.crr * total_mass_kg * G * math.cos(theta)
+        F_grade = total_mass_kg * G * math.sin(theta)
+        F_total = F_aero + F_roll + F_grade
+
+        if F_total >= 0.0:
+            # Motor driving: attribute each force to battery draw
+            J_aero  += F_aero  * L / cfg.eta_drive
+            J_roll  += F_roll  * L / cfg.eta_drive
+            J_grade += F_grade * L / cfg.eta_drive   # can be negative (downhill-but-driving)
+        else:
+            # Regen: motor acts as generator; aero+rolling act as passive brakes
+            J_regen += F_total * L * cfg.eta_regen   # negative
+
+        # Auxiliary and HVAC always draw from battery (even during regen)
+        J_aux  += p_aux_kw  * 1_000.0 * t_s   # kW→W, then ×s = J
+        J_hvac += p_hvac_kw * 1_000.0 * t_s
+
+    # ── Stop-and-go inertia correction ────────────────────────────────────────
+    # Kinetic energy budget for traffic stops.
+    # Assumption: documented in ASSUMPTIONS.md
+    total_distance_m = sum(s.length_m for s in segments)
+    distance_km = max(total_distance_m / 1000.0, 1e-6)
+
+    spk = _stops_per_km(v_kmh, cfg)
+    ke_per_stop_J = (
+        0.5 * total_mass_kg * v_mps ** 2 * cfg.inertia_factor * accel_factor
     )
-    rolling = rolling_resistance_term(total_weight, trip.distance_km)
-    elev_gain = elevation_gain_term(total_weight, trip.elevation_gain_m)
-    regen = regen_recovery_term(total_weight, trip.elevation_loss_m)
-    hvac = hvac_term(trip.temperature_c, duration_min)
+    n_stops = spk * distance_km
+    total_ke_J = n_stops * ke_per_stop_J
 
-    subtotal = base + aero + rolling + elev_gain - regen + hvac
-    style_mult = DRIVING_STYLE_MULTIPLIER.get(trip.driving_style, 1.0)
-    energy = subtotal * style_mult
+    # Portion recovered by regen, portion lost as heat/brake friction
+    J_regen -= total_ke_J * cfg.eta_regen           # additional regen credit (negative)
+    J_inertia = total_ke_J * (1.0 - cfg.eta_regen) / cfg.eta_drive  # net loss
 
-    noise = 0.0
-    if add_noise:
-        # ~8% coefficient of variation — models traffic, wind, tire wear, etc.
-        noise = rng.normal(0.0, max(energy * 0.08, 0.05))
-        energy += noise
+    # ── Convert to Wh/km ─────────────────────────────────────────────────────
+    def to_wh_km(joules: float) -> float:
+        return joules / 3_600.0 / distance_km
 
-    energy = max(energy, 0.01)
+    wh_aero     = to_wh_km(J_aero)
+    wh_roll     = to_wh_km(J_roll)
+    wh_grade    = to_wh_km(J_grade)
+    wh_regen    = to_wh_km(J_regen)
+    wh_inertia  = to_wh_km(J_inertia)
+    wh_aux      = to_wh_km(J_aux)
+    wh_hvac     = to_wh_km(J_hvac)
+
+    total_wh_km = wh_aero + wh_roll + wh_grade + wh_regen + wh_inertia + wh_aux + wh_hvac
 
     return EnergyBreakdown(
-        base_consumption_kwh=base,
-        aero_drag_kwh=aero,
-        rolling_resistance_kwh=rolling,
-        elevation_gain_kwh=elev_gain,
-        regen_recovery_kwh=regen,
-        hvac_kwh=hvac,
-        style_multiplier=style_mult,
-        noise_kwh=noise,
-        total_energy_kwh=energy,
+        aero_wh_per_km=round(wh_aero, 3),
+        rolling_wh_per_km=round(wh_roll, 3),
+        gradient_wh_per_km=round(wh_grade, 3),
+        inertia_wh_per_km=round(wh_inertia, 3),
+        regen_wh_per_km=round(wh_regen, 3),
+        auxiliary_wh_per_km=round(wh_aux, 3),
+        hvac_wh_per_km=round(wh_hvac, 3),
+        total_wh_per_km=round(total_wh_km, 3),
+        total_trip_wh=round(total_wh_km * distance_km, 3),
+        trip_distance_km=round(distance_km, 4),
     )
 
 
-def energy_to_range_km(energy_kwh: float, battery_kwh: float, claimed_range_km: float) -> float:
+def range_km(ev: EVSpecs, wh_per_km: float) -> float:
     """
-    Convert trip energy to achievable range on full battery.
-    Uses proportional scaling: range = battery / (energy/distance).
-    Caps unrealistic values near claimed range * 1.15.
+    Predicted range in km.
+    Range = usable_battery_kwh / (wh_per_km / 1000)
+    No clamps applied.
     """
-    if energy_kwh <= 0:
-        return claimed_range_km
-    consumption_per_km = energy_kwh  # normalized per-km when distance=1 in caller
-    return min(battery_kwh / consumption_per_km, claimed_range_km * 1.15)
+    if wh_per_km <= 0.0:
+        return float("inf")
+    return ev.usable_battery_kwh * 1_000.0 / wh_per_km
 
 
-def simulate_range_km(
+# ── Convenience: build segments from elevation totals ─────────────────────────
+
+def segments_from_elevation_totals(
+    distance_km: float,
+    elevation_gain_m: float,
+    elevation_loss_m: float,
+    n_segments: int = 20,
+) -> list[SegmentData]:
+    """
+    Create a representative segment list when per-segment OSRM data is not
+    available (e.g., validation scenarios and tests).
+
+    Alternates between climbing (gain/n) and descending (loss/n) segments
+    so that elevation gain and loss are both represented.
+    """
+    seg_len_m = distance_km * 1000.0 / n_segments
+    climb_per = elevation_gain_m / max(n_segments // 2, 1)
+    descend_per = elevation_loss_m / max(n_segments // 2, 1)
+
+    segments: list[SegmentData] = []
+    for i in range(n_segments):
+        if i % 2 == 0:
+            g = climb_per / seg_len_m if seg_len_m > 0 else 0.0
+        else:
+            g = -descend_per / seg_len_m if seg_len_m > 0 else 0.0
+        segments.append(SegmentData(gradient=g, length_m=seg_len_m))
+    return segments
+
+
+def simulate_energy_simple(
     ev: EVSpecs,
-    trip: TripConditions,
-    *,
-    add_noise: bool = True,
-    rng: np.random.Generator | None = None,
-) -> tuple[float, EnergyBreakdown]:
+    distance_km: float,
+    elevation_gain_m: float,
+    elevation_loss_m: float,
+    avg_speed_kmh: float,
+    temperature_c: float,
+    driving_style: DrivingStyle = "normal",
+    num_passengers: int = 1,
+    ac_on: bool = True,
+    altitude_m: float = 0.0,
+    config: PhysicsConfig | None = None,
+) -> EnergyBreakdown:
     """
-    Simulate real-world range (km on full charge) implied by trip conditions.
-    Normalizes energy to per-km consumption then scales to battery capacity.
+    Convenience wrapper when per-segment OSRM data is unavailable.
+    Internally creates a representative segment list.
     """
-    breakdown = simulate_trip_energy(ev, trip, add_noise=add_noise, rng=rng)
-    per_km = breakdown.total_energy_kwh / max(trip.distance_km, 0.1)
-    range_km = ev.battery_capacity_kwh / per_km
-    # Soft cap — no EV exceeds ~115% of claimed range in real conditions
-    if ev.claimed_range_km > 0:
-        range_km = min(range_km, ev.claimed_range_km * 1.12)
-    range_km = max(range_km, ev.claimed_range_km * 0.45 if ev.claimed_range_km else 50)
-    return range_km, breakdown
+    segs = segments_from_elevation_totals(
+        distance_km, elevation_gain_m, elevation_loss_m
+    )
+    return simulate_energy(
+        ev, segs, avg_speed_kmh, temperature_c,
+        driving_style=driving_style,
+        num_passengers=num_passengers,
+        ac_on=ac_on,
+        altitude_m=altitude_m,
+        config=config,
+    )
