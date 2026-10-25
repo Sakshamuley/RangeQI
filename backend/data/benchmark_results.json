@@ -1,52 +1,77 @@
 {
-  "linear_regression": {
-    "mae": 34.055,
-    "rmse": 45.744,
-    "train_time_sec": 0.004,
-    "inference_time_ms": 0.0001
-  },
-  "random_forest": {
-    "mae": 24.018,
-    "rmse": 33.857,
-    "train_time_sec": 0.311,
-    "inference_time_ms": 0.025
-  },
-  "xgboost": {
-    "mae": 21.156,
-    "rmse": 28.966,
-    "train_time_sec": 0.524,
-    "inference_time_ms": 0.0013
-  },
-  "best_model": "xgboost",
-  "quantile_models": {
-    "p10": {
-      "mae": 39.755,
-      "train_time_sec": 4.36
-    },
-    "p50": {
-      "mae": 22.282,
-      "train_time_sec": 4.37
-    },
-    "p90": {
-      "mae": 39.171,
-      "train_time_sec": 3.531
-    }
-  },
-  "training_samples": 8000,
-  "feature_columns": [
+  "training_rows": 4800,
+  "n_evs": 16,
+  "ev_names": [
+    "Citroen eC3",
+    "Hyundai Creta Electric LR",
+    "Kia Carens Clavis EV",
+    "MG Comet EV",
+    "MG Windsor EV",
+    "MG ZS EV",
+    "Mahindra BE 6",
+    "Mahindra XEV 9S",
+    "Mahindra XEV 9e",
+    "Tata Curvv EV",
+    "Tata Harrier EV AWD",
+    "Tata Nexon EV 40.5 kWh",
+    "Tata Nexon EV 45 kWh",
+    "Tata Tiago EV 24 kWh",
+    "Tata Tigor EV",
+    "VinFast VF7 AWD"
+  ],
+  "feature_cols": [
     "battery_capacity_kwh",
+    "usable_battery_kwh",
     "kerb_weight_kg",
     "drag_coefficient",
     "frontal_area_m2",
     "motor_power_kw",
-    "claimed_range_km",
     "distance_km",
+    "mean_gradient_mpkm",
+    "elevation_gain_per_km",
+    "elevation_loss_per_km",
     "avg_speed_kmh",
-    "elevation_gain_m",
-    "elevation_loss_m",
+    "highway_fraction",
     "temperature_c",
     "num_passengers",
-    "driving_style",
-    "season"
-  ]
+    "ac_on",
+    "driving_style_code"
+  ],
+  "cv_strategy": "GroupKFold(n_splits=4) by ev_name",
+  "note": "The ML layer is a fast emulator of the physics model trained on simulated data (Monte Carlo over uncertain parameters). It does NOT incorporate road-test data. Accuracy against road tests is in validation_results.json.",
+  "quantile_models": {
+    "p10": {
+      "alpha": 0.1,
+      "target": "p10_wh_per_km",
+      "cv_mae_wh_per_km": 9.872,
+      "cv_mae_folds": [
+        10.7183,
+        9.7426,
+        8.7333,
+        10.2938
+      ]
+    },
+    "p50": {
+      "alpha": 0.5,
+      "target": "p50_wh_per_km",
+      "cv_mae_wh_per_km": 7.6646,
+      "cv_mae_folds": [
+        7.4536,
+        7.6127,
+        9.4927,
+        6.0994
+      ]
+    },
+    "p90": {
+      "alpha": 0.9,
+      "target": "p90_wh_per_km",
+      "cv_mae_wh_per_km": 12.0251,
+      "cv_mae_folds": [
+        10.9271,
+        12.6964,
+        14.6914,
+        9.7854
+      ]
+    }
+  }
 }

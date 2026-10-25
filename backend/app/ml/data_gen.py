@@ -1,4 +1,25 @@
-"""Synthetic training dataset generation (shared by CLI and startup)."""
+"""
+Monte Carlo training data generator for the RangeIQ ML emulator.
+
+Each row represents one (EV, trip) scenario.  For each scenario, the physics
+model is evaluated N_MC_SAMPLES times with randomly drawn uncertain parameters
+(Crr, eta_drive, eta_regen, p_aux, HVAC scale, headwind, usable battery
+fraction).  The p10/p50/p90 of the resulting Wh/km values become the targets
+for the quantile-regression ML layer.
+
+IMPORTANT: The p10–p90 band reflects assumed parameter uncertainty ONLY.
+It does NOT represent measurement error or road-test validation.  Accuracy
+against reality is quantified separately in validation_results.json.
+
+The ML layer is a fast emulator and uncertainty estimator of the physics
+model.  It is trained on simulated data.
+
+References:
+  [FAR16] Fiori, Ahn & Rakha 2016, Appl. Energy 168
+  [DF21]  Dollinger & Fischerauer 2021, Energies 14(18) 5804
+  [G92]   Gillespie, "Fundamentals of Vehicle Dynamics"
+  [YM15]  Yuksel & Michalek 2015 (temperature effect on EV range)
+"""
 
 from __future__ import annotations
 
@@ -8,101 +29,231 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from app.simulator import EVSpecs, TripConditions, simulate_range_km
+from app.physics_config import PhysicsConfig
+from app.simulator import EVSpecs, simulate_energy_simple
+from app.validation import EV_SPECS  # canonical physics specs (Phase 4)
 
 logger = logging.getLogger(__name__)
 
 OUTPUT_PATH = Path(__file__).resolve().parent.parent.parent / "data" / "training_data.csv"
 
-EV_FLEET: list[EVSpecs] = [
-    EVSpecs(40.5, 1400, 0.32, 2.35, 105, 437),
-    EVSpecs(30.2, 1400, 0.32, 2.35, 95, 312),
-    EVSpecs(24.0, 1235, 0.33, 2.20, 55, 250),
-    EVSpecs(35.0, 1365, 0.33, 2.30, 80, 421),
-    EVSpecs(17.3, 1045, 0.35, 2.05, 42, 230),
-    EVSpecs(50.3, 1530, 0.33, 2.45, 130, 461),
-    EVSpecs(38.0, 1740, 0.34, 2.55, 134, 331),
-    EVSpecs(39.2, 1685, 0.29, 2.40, 100, 452),
-    EVSpecs(72.6, 1985, 0.29, 2.55, 160, 631),
-    EVSpecs(39.4, 1580, 0.34, 2.50, 110, 456),
-    EVSpecs(59.0, 2185, 0.33, 2.60, 170, 557),
-    EVSpecs(60.48, 1750, 0.29, 2.45, 150, 521),
-    EVSpecs(82.56, 2185, 0.23, 2.35, 230, 650),
-    EVSpecs(29.2, 1275, 0.34, 2.25, 57, 320),
-    EVSpecs(77.4, 2055, 0.28, 2.50, 168, 708),
-    EVSpecs(64.7, 2085, 0.26, 2.45, 200, 531),
-    EVSpecs(66.5, 2040, 0.28, 2.45, 140, 560),
-    EVSpecs(78.0, 2188, 0.32, 2.50, 150, 418),
-    EVSpecs(75.0, 2003, 0.23, 2.52, 220, 533),
-]
+# ── Generation constants ──────────────────────────────────────────────────────
+N_TRIPS_PER_EV = 300     # trip scenarios per EV
+N_MC_SAMPLES   = 40      # physics evaluations per trip (for p10/p50/p90)
+RANDOM_SEED    = 42
 
-STYLES = ["aggressive", "normal", "calm"]
-SEASONS = {"summer": 38, "monsoon": 28, "winter": 18, "spring": 26}
+# ── Terrain classes (assumed; documented in ASSUMPTIONS.md) ──────────────────
+# mean absolute gradient m/km: U(lo, hi)
+TERRAIN_CLASSES = {
+    "flat":    (0.0,  6.0),
+    "rolling": (6.0, 18.0),
+    "hilly":   (18.0, 45.0),
+}
+TERRAIN_PROBS = [0.45, 0.35, 0.20]   # assumed Indian route distribution
+
+# ── Road class speed ranges km/h (assumed) ────────────────────────────────────
+ROAD_CLASS_SPEED = {
+    "urban":   (15,  50),
+    "mixed":   (45,  85),
+    "highway": (75, 120),
+}
+ROAD_CLASS_PROBS = [0.30, 0.40, 0.30]   # assumed
+
+# ── Season temperature ranges °C (India) ─────────────────────────────────────
+SEASON_TEMP_RANGE = {
+    "winter":  ( 8, 22),
+    "spring":  (20, 38),
+    "monsoon": (22, 32),
+    "autumn":  (18, 30),
+}
+SEASON_PROBS = [0.20, 0.30, 0.30, 0.20]
+
+# ── Calibrated parameter centres (Phase 4) ───────────────────────────────────
+# These replace the prior nominals as the sampling centres.
+CALIB_P_AUX_KW  = 1.00   # calibrated; prior was 0.25
+CALIB_ETA_REGEN = 0.30   # calibrated; prior was 0.65
+
+# Usable battery fraction: U(0.90, 0.97) — assumed
+USABLE_FRAC_LO = 0.90
+USABLE_FRAC_HI = 0.97
 
 
-def generate_training_data(n_samples: int = 8000, seed: int = 42) -> pd.DataFrame:
+def _sample_config(rng: np.random.Generator) -> PhysicsConfig:
+    """
+    Sample a PhysicsConfig from the uncertain-parameter distributions.
+    Centres are the Phase-4 calibrated values; spreads from PARAM_CATALOGUE.
+    The resulting spread is the sole source of the p10–p90 band.
+    """
+    crr       = float(np.clip(rng.normal(0.011, 0.002),         0.005, 0.025))
+    eta_drive = float(np.clip(rng.normal(0.92,  0.02),          0.80,  0.99))
+    eta_regen = float(np.clip(rng.normal(CALIB_ETA_REGEN, 0.05), 0.10, 0.60))
+    p_aux_kw  = float(np.clip(rng.normal(CALIB_P_AUX_KW,  0.15), 0.30, 2.00))
+    v_wind    = float(rng.normal(0.0, 2.0))
+    hvac_s    = float(np.clip(rng.uniform(0.70, 1.30), 0.50, 1.80))
+
+    return PhysicsConfig(
+        crr=crr,
+        eta_drive=eta_drive,
+        eta_regen=eta_regen,
+        p_aux_kw=p_aux_kw,
+        v_wind_mps=v_wind,
+        hvac_base_kw=round(0.20 * hvac_s, 4),
+        hvac_heat_coef_kw_per_c=round(0.10 * hvac_s, 4),
+        hvac_cool_coef_kw_per_c=round(0.07 * hvac_s, 4),
+    )
+
+
+def _sample_trip(rng: np.random.Generator) -> dict:
+    """Sample one trip scenario (EV-independent features)."""
+    # Distance: log-uniform 5–500 km
+    distance_km = float(np.exp(rng.uniform(np.log(5), np.log(500))))
+
+    # Terrain
+    terrain = str(rng.choice(list(TERRAIN_CLASSES), p=TERRAIN_PROBS))
+    grad_lo, grad_hi = TERRAIN_CLASSES[terrain]
+    mean_abs_gradient_mpkm = float(rng.uniform(grad_lo, grad_hi))
+
+    # Elevation: gain ≈ half distance × gradient; loss correlated with gain
+    gain_per_km = mean_abs_gradient_mpkm * 0.5
+    gain_m  = gain_per_km * distance_km
+    loss_m  = gain_m * float(rng.uniform(0.70, 1.00))   # net elev change small
+
+    # Road class and speed
+    road_class = str(rng.choice(list(ROAD_CLASS_SPEED), p=ROAD_CLASS_PROBS))
+    spd_lo, spd_hi = ROAD_CLASS_SPEED[road_class]
+    avg_speed_kmh = float(rng.uniform(spd_lo, spd_hi))
+    if road_class == "highway":
+        highway_fraction = 1.0
+    elif road_class == "urban":
+        highway_fraction = 0.0
+    else:
+        highway_fraction = float(rng.uniform(0.10, 0.50))
+
+    # Temperature (season + Gaussian noise)
+    season = str(rng.choice(list(SEASON_TEMP_RANGE), p=SEASON_PROBS))
+    t_lo, t_hi = SEASON_TEMP_RANGE[season]
+    temperature_c = float(np.clip(rng.uniform(t_lo, t_hi) + rng.normal(0, 2), -5, 48))
+
+    # Passengers 1–5
+    num_passengers = int(rng.integers(1, 6))
+
+    # AC: forced on >30 °C, forced off <10 °C, else random
+    if temperature_c > 30.0:
+        ac_on = 1
+    elif temperature_c < 10.0:
+        ac_on = 0
+    else:
+        ac_on = int(rng.random() > 0.35)
+
+    # Driving style
+    driving_style = str(rng.choice(
+        ["aggressive", "normal", "calm"], p=[0.20, 0.55, 0.25]
+    ))
+
+    return {
+        "distance_km":            round(distance_km, 3),
+        "terrain":                terrain,
+        "mean_gradient_mpkm":     round(mean_abs_gradient_mpkm, 3),
+        "elevation_gain_per_km":  round(gain_per_km, 4),
+        "elevation_loss_per_km":  round(loss_m / distance_km, 4),
+        "elevation_gain_m":       round(gain_m, 2),
+        "elevation_loss_m":       round(loss_m, 2),
+        "avg_speed_kmh":          round(avg_speed_kmh, 2),
+        "highway_fraction":       round(highway_fraction, 3),
+        "road_class":             road_class,
+        "temperature_c":          round(temperature_c, 2),
+        "season":                 season,
+        "num_passengers":         num_passengers,
+        "ac_on":                  ac_on,
+        "driving_style":          driving_style,
+        "driving_style_code":     {"calm": 0, "normal": 1, "aggressive": 2}[driving_style],
+    }
+
+
+def generate(
+    n_trips: int = N_TRIPS_PER_EV,
+    n_mc: int = N_MC_SAMPLES,
+    seed: int = RANDOM_SEED,
+    output_path: Path | None = None,
+) -> pd.DataFrame:
+    """
+    Generate the Monte Carlo training dataset.
+
+    For each (EV, trip) pair runs n_mc physics simulations with sampled
+    uncertain parameters.  Records p10/p50/p90 Wh/km as targets.
+    """
     rng = np.random.default_rng(seed)
     rows: list[dict] = []
 
-    for _ in range(n_samples):
-        ev = EV_FLEET[rng.integers(0, len(EV_FLEET))]
-        distance = float(rng.uniform(20, 400))
-        avg_speed = float(rng.uniform(25, 110))
-        elev_gain = float(rng.exponential(150))
-        elev_loss = float(rng.exponential(150))
-        season = rng.choice(list(SEASONS.keys()))
-        temp = float(SEASONS[season] + rng.normal(0, 4))
-        style = str(rng.choice(STYLES))
-        passengers = int(rng.integers(1, 5))
+    ev_names = list(EV_SPECS.keys())
+    logger.info(
+        "Generating %d EVs × %d trips × %d MC samples = %d physics calls …",
+        len(ev_names), n_trips, n_mc, len(ev_names) * n_trips * n_mc,
+    )
 
-        trip = TripConditions(
-            distance_km=distance,
-            avg_speed_kmh=avg_speed,
-            elevation_gain_m=elev_gain,
-            elevation_loss_m=elev_loss,
-            temperature_c=temp,
-            driving_style=style,  # type: ignore[arg-type]
-            num_passengers=passengers,
-        )
+    for ev_name, spec in EV_SPECS.items():
+        for _ in range(n_trips):
+            trip = _sample_trip(rng)
 
-        range_km, bd = simulate_range_km(ev, trip, add_noise=True, rng=rng)
-        per_km_energy = bd.total_energy_kwh / max(distance, 0.1)
+            # --- Monte Carlo over uncertain physics parameters ---
+            wh_samples: list[float] = []
+            for _ in range(n_mc):
+                cfg = _sample_config(rng)
+                usable_frac = float(rng.uniform(USABLE_FRAC_LO, USABLE_FRAC_HI))
+                ev = EVSpecs(
+                    battery_capacity_kwh=spec["battery_capacity_kwh"],
+                    usable_battery_kwh=spec["battery_capacity_kwh"] * usable_frac,
+                    kerb_weight_kg=spec["kerb_weight_kg"],
+                    drag_coefficient=spec["drag_coefficient"],
+                    frontal_area_m2=spec["frontal_area_m2"],
+                    motor_power_kw=spec["motor_power_kw"],
+                )
+                res = simulate_energy_simple(
+                    ev=ev,
+                    distance_km=trip["distance_km"],
+                    elevation_gain_m=trip["elevation_gain_m"],
+                    elevation_loss_m=trip["elevation_loss_m"],
+                    avg_speed_kmh=trip["avg_speed_kmh"],
+                    temperature_c=trip["temperature_c"],
+                    driving_style=trip["driving_style"],      # type: ignore[arg-type]
+                    num_passengers=trip["num_passengers"],
+                    ac_on=bool(trip["ac_on"]),
+                    config=cfg,
+                )
+                wh_samples.append(res.total_wh_per_km)
 
-        rows.append(
-            {
-                "battery_capacity_kwh": ev.battery_capacity_kwh,
-                "kerb_weight_kg": ev.kerb_weight_kg,
-                "drag_coefficient": ev.drag_coefficient,
-                "frontal_area_m2": ev.frontal_area_m2,
-                "motor_power_kw": ev.motor_power_kw,
-                "claimed_range_km": ev.claimed_range_km,
-                "distance_km": distance,
-                "avg_speed_kmh": avg_speed,
-                "elevation_gain_m": elev_gain,
-                "elevation_loss_m": elev_loss,
-                "temperature_c": temp,
-                "driving_style": style,
-                "num_passengers": passengers,
-                "season": season,
-                "base_consumption_kwh": bd.base_consumption_kwh,
-                "aero_drag_kwh": bd.aero_drag_kwh,
-                "rolling_resistance_kwh": bd.rolling_resistance_kwh,
-                "elevation_gain_kwh": bd.elevation_gain_kwh,
-                "regen_recovery_kwh": bd.regen_recovery_kwh,
-                "hvac_kwh": bd.hvac_kwh,
-                "style_multiplier": bd.style_multiplier,
-                "trip_energy_kwh": bd.total_energy_kwh,
-                "energy_per_km": per_km_energy,
-                "real_world_range_km": range_km,
-            }
-        )
+            arr = np.array(wh_samples)
+            p10, p50, p90 = np.percentile(arr, [10, 50, 90])
 
-    return pd.DataFrame(rows)
+            rows.append({
+                # EV physics features (no claimed_range_km)
+                "ev_name":               ev_name,
+                "battery_capacity_kwh":  spec["battery_capacity_kwh"],
+                "usable_battery_kwh":    spec["usable_battery_kwh"],
+                "kerb_weight_kg":        spec["kerb_weight_kg"],
+                "drag_coefficient":      spec["drag_coefficient"],
+                "frontal_area_m2":       spec["frontal_area_m2"],
+                "motor_power_kw":        spec["motor_power_kw"],
+                # Trip features
+                "distance_km":           trip["distance_km"],
+                "mean_gradient_mpkm":    trip["mean_gradient_mpkm"],
+                "elevation_gain_per_km": trip["elevation_gain_per_km"],
+                "elevation_loss_per_km": trip["elevation_loss_per_km"],
+                "avg_speed_kmh":         trip["avg_speed_kmh"],
+                "highway_fraction":      trip["highway_fraction"],
+                "temperature_c":         trip["temperature_c"],
+                "num_passengers":        trip["num_passengers"],
+                "ac_on":                 trip["ac_on"],
+                "driving_style_code":    trip["driving_style_code"],
+                # Targets
+                "p10_wh_per_km":  round(float(p10), 4),
+                "p50_wh_per_km":  round(float(p50), 4),
+                "p90_wh_per_km":  round(float(p90), 4),
+            })
 
-
-def save_training_csv(n_samples: int = 8000) -> Path:
-    df = generate_training_data(n_samples=n_samples)
-    OUTPUT_PATH.parent.mkdir(parents=True, exist_ok=True)
-    df.to_csv(OUTPUT_PATH, index=False)
-    logger.info("Saved %d rows to %s", len(df), OUTPUT_PATH)
-    return OUTPUT_PATH
+    df = pd.DataFrame(rows)
+    out = output_path or OUTPUT_PATH
+    out.parent.mkdir(parents=True, exist_ok=True)
+    df.to_csv(out, index=False)
+    logger.info("Wrote %d rows to %s", len(df), out)
+    return df
