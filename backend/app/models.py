@@ -90,6 +90,6 @@ class PredictionScan(Base):
 
     id = Column(Integer, primary_key=True, autoincrement=True)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
-    ev_model_ids = Column(Text, nullable=False)   # JSON array of int
+    ev_model_ids = Column(Text)   # JSON array of int; NULL for /recommend (no pre-filter by ID)
     input_json = Column(Text, nullable=False)
     output_json = Column(Text, nullable=False)

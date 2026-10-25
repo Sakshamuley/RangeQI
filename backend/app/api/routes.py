@@ -1,4 +1,4 @@
-"""FastAPI route handlers — Phase 2 update."""
+"""FastAPI route handlers — Phase 6 update."""
 
 from __future__ import annotations
 
@@ -12,14 +12,26 @@ from sqlalchemy.orm import Session
 
 from app.database import get_db
 from app.models import BODY_TYPES, EVModel, PredictionScan
-from app.schemas import EVModelOut, PredictRequest
+from app.schemas import (
+    EVModelOut,
+    PredictRequest,
+    PredictResponse,
+    RecommendRequest,
+    RecommendResponse,
+    EVPredictionResult,
+    RangeQuantiles,
+    EnergyTermBreakdown,
+    CarbonComparison,
+)
 from app.services.route_service import get_full_route
+from app.services.recommend_service import recommend as _recommend
+from app.services.geocoding_service import geocode
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
 
-BACKEND_ROOT = Path(__file__).resolve().parent.parent.parent
-BENCHMARK_JSON = BACKEND_ROOT / "data" / "benchmark_results.json"
+BACKEND_ROOT    = Path(__file__).resolve().parent.parent.parent
+BENCHMARK_JSON  = BACKEND_ROOT / "data" / "benchmark_results.json"
 VALIDATION_JSON = BACKEND_ROOT / "data" / "validation_results.json"
 
 
@@ -104,13 +116,27 @@ async def route_elevation(
         season=season,
         db=db,
     )
-    # gradient_segments are tuples — make JSON-serialisable
     result = dict(result)
     result["gradient_segments"] = [
         {"gradient": g, "length_m": l}
         for g, l in result.get("gradient_segments", [])
     ]
     return result
+
+
+@router.get("/geocode")
+async def geocode_place(place: str, db: Session = Depends(get_db)):
+    """
+    Resolve a place name to lat/lon via Nominatim (OpenStreetMap).
+    Results are cached for 7 days.
+    """
+    try:
+        lat, lon = await geocode(place, db=db)
+    except ValueError as exc:
+        raise HTTPException(404, str(exc))
+    except Exception as exc:
+        raise HTTPException(502, f"Geocoding failed: {exc}")
+    return {"place": place, "lat": lat, "lon": lon}
 
 
 # ── Benchmark / validation data ───────────────────────────────────────────────
@@ -165,19 +191,137 @@ def get_scan(scan_id: int, db: Session = Depends(get_db)):
     }
 
 
-# ── Predict / Recommend (stubs — implemented in Phases 3–6) ──────────────────
+# ── Recommend ─────────────────────────────────────────────────────────────────
+
+@router.post("/recommend", response_model=RecommendResponse)
+async def recommend(req: RecommendRequest, db: Session = Depends(get_db)):
+    """
+    Ranked EV recommendation for a given route.
+
+    Inputs: route coordinates, optional price range, optional body type,
+    and advanced driving-profile parameters.
+
+    Returns a ranked list of EVs with:
+      - p10/p50/p90 range bands (conservative / expected / optimistic)
+      - verdict: Suitable / Marginal / Not suitable
+      - range margin (km and %)
+      - trip energy (kWh), estimated charging cost (₹)
+      - per-term energy breakdown from the physics model
+      - CO₂ comparison vs petrol (illustrative)
+
+    All prices and CO₂ figures are labelled illustrative.
+    Fallback warnings are returned when any upstream API is unavailable.
+    """
+    return await _recommend(req, db)
+
+
+# ── Predict (single-model mode) ───────────────────────────────────────────────
 
 @router.post("/predict")
 async def predict(req: PredictRequest, db: Session = Depends(get_db)):
-    """Single-model prediction.  Implemented fully in Phase 3."""
-    raise HTTPException(
-        501,
-        "POST /api/predict will be fully implemented after Phase 3 (physics rewrite). "
-        "Use POST /api/recommend after Phase 6 for production use.",
+    """
+    Check specific EV model(s) against a route — uses the same pipeline as /recommend.
+
+    Provide ev_model_ids to select which EVs to evaluate.
+    """
+    from app.services.recommend_service import (
+        _segments_from_route, _evaluate_ev, _get_predictor,
+        _CALIBRATED_CONFIG, ELECTRICITY_PRICE_INR_PER_KWH,
     )
+    from app.simulator import range_km as phys_range_km
 
+    # Resolve route
+    if req.route:
+        route_info = await get_full_route(
+            req.route.start_lat, req.route.start_lon,
+            req.route.end_lat, req.route.end_lon,
+            db=db,
+        )
+    elif req.daily_distance_km:
+        # Simple flat-road approximation when only distance is given
+        from app.simulator import SegmentData
+        route_info = {
+            "distance_km": req.daily_distance_km,
+            "duration_s": req.daily_distance_km / 60.0 * 3600,
+            "avg_speed_kmh": 60.0,
+            "elevation_gain_m": 0.0,
+            "elevation_loss_m": 0.0,
+            "start_elevation_m": 0.0,
+            "temperature_c": 28.0,
+            "gradient_segments": [(0.0, req.daily_distance_km * 50.0)],
+            "profile": [],
+            "fallback_warnings": ["No route provided — using flat-road approximation at 60 km/h, 28 °C"],
+            "route_fallback": True,
+            "elevation_fallback": True,
+            "weather_fallback": True,
+        }
+    else:
+        raise HTTPException(400, "Provide route or daily_distance_km")
 
-@router.post("/recommend")
-async def recommend(db: Session = Depends(get_db)):
-    """Ranked EV recommendation.  Implemented in Phase 6."""
-    raise HTTPException(501, "POST /api/recommend will be implemented in Phase 6.")
+    api_warnings: list[str] = list(route_info.get("fallback_warnings", []))
+    distance_km = route_info["distance_km"]
+    trip_distance_km = distance_km * (2 if req.round_trip else 1)
+    required_km = round(trip_distance_km * (1.0 + req.reserve_pct / 100.0), 1)
+    segments = _segments_from_route(route_info["gradient_segments"])
+
+    evs = db.query(EVModel).filter(EVModel.id.in_(req.ev_model_ids)).all()
+    if not evs:
+        raise HTTPException(404, "No EV models found for the given IDs")
+
+    predictions = []
+    ml_warns: list[str] = []
+    for ev_row in evs:
+        # Build a minimal RecommendRequest-like object for _evaluate_ev
+        class _FakeReq:
+            driving_style = req.driving_style
+            num_passengers = req.num_passengers
+            ac_on = req.ac_on
+            round_trip = req.round_trip
+
+        try:
+            r = _evaluate_ev(
+                ev_row, segments, route_info, _FakeReq(),
+                required_km=required_km,
+                trip_distance_km=trip_distance_km,
+                warnings_out=ml_warns,
+            )
+            from app.schemas import EVPredictionResult
+            predictions.append(EVPredictionResult(
+                ev_model_id=r.ev_model_id,
+                model_name=r.model_name,
+                claimed_range_km=r.claimed_range_km,
+                predicted_range=r.predicted_range,
+                verdict=r.verdict,
+                range_margin_km=r.range_margin_km,
+                trip_energy_kwh=r.trip_energy_kwh,
+                energy_breakdown=r.energy_breakdown,
+                carbon=r.carbon,
+                warnings=r.warnings,
+            ))
+        except Exception as exc:
+            api_warnings.append(f"Could not evaluate {ev_row.model_name}: {exc}")
+
+    for w in ml_warns:
+        if w not in api_warnings:
+            api_warnings.append(w)
+
+    scan = PredictionScan(
+        input_json=json.dumps(req.model_dump()),
+        output_json=json.dumps({"n_evs": len(predictions)}),
+    )
+    db.add(scan)
+    db.commit()
+    db.refresh(scan)
+
+    from app.schemas import PredictResponse
+    return PredictResponse(
+        scan_id=scan.id,
+        trip_distance_km=round(trip_distance_km, 2),
+        temperature_c=round(route_info["temperature_c"], 1),
+        elevation_gain_m=round(route_info["elevation_gain_m"], 1),
+        elevation_loss_m=round(route_info["elevation_loss_m"], 1),
+        required_km=required_km,
+        predictions=predictions,
+        route_profile=route_info.get("profile", [])[:200],
+        api_warnings=api_warnings,
+    )
