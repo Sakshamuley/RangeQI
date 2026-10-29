@@ -35,20 +35,20 @@ logger = logging.getLogger("rangeiq")
 def _ensure_training_pipeline() -> None:
     """Generate training data and train models if not already present."""
     try:
-        from app.ml.train import TRAINING_CSV, MODELS_DIR, main as train_main
+        from app.ml.train import DATA_PATH, MODELS_DIR, train as train_fn
         from app.ml.data_gen import save_training_csv
     except Exception as exc:
         logger.warning("ML pipeline import failed: %s", exc)
         return
 
-    if not TRAINING_CSV.exists():
+    if not DATA_PATH.exists():
         logger.info("Generating synthetic training data…")
         save_training_csv()
 
     quantile_path = MODELS_DIR / "quantile_models.joblib"
     if not quantile_path.exists():
         logger.info("Training ML models (this may take a minute)…")
-        train_main()
+        train_fn()
 
 
 @asynccontextmanager
@@ -62,18 +62,22 @@ async def lifespan(app: FastAPI):
 
     _ensure_training_pipeline()
 
-    # Load ML models if available
+    # Load ML models if available and instantiate the singleton predictor
     try:
-        from app.ml.predict import predictor
-        predictor._load_models()
+        from app.ml.predict import QuantilePredictor
+        _predictor = QuantilePredictor()
+        if _predictor.is_ready:
+            logger.info("ML quantile models loaded successfully")
+        else:
+            logger.warning("ML models not ready — physics fallback will be used")
     except Exception as exc:
         logger.warning("ML model load skipped: %s", exc)
+        _predictor = None
 
     # Run validation if available
     try:
         from app.validation import run_validation
-        from app.ml.predict import predictor as pred
-        run_validation(pred if pred.is_ready else None)
+        run_validation(_predictor if (_predictor and _predictor.is_ready) else None)
     except Exception as exc:
         logger.warning("Validation run skipped: %s", exc)
 
