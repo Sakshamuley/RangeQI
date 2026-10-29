@@ -6,9 +6,9 @@ Every parameter used in the segment-based energy model is listed below.
 > [!IMPORTANT]
 > Parameters marked **assumed** were chosen from engineering judgement or literature
 > ranges and have **not** been independently measured for the specific EV models in
-> this dataset. Parameters marked **calibrated** are adjusted in Phase 4 validation
-> to minimise error on five calibration cases; their calibrated values replace the
-> prior nominals in `physics_config.py` after Phase 4.
+> this dataset. Parameters marked **calibrated** were optimised in Phase 4 by
+> multi-start L-BFGS-B against 12 Autocar India road-test calibration cases;
+> their calibrated values are used in `PhysicsConfig` and the recommendation pipeline.
 
 ---
 
@@ -19,10 +19,10 @@ Every parameter used in the segment-based energy model is listed below.
 | G | 9.81 | m/s² | constant | physical constant | published |
 | Crr | 0.011 | dimensionless | N(0.011, 0.002) | [FAR16] Table 1; assumed for EV tyres in Indian conditions | assumed |
 | eta_drive | 0.92 | fraction | N(0.92, 0.02) | [DF21] §3.1; typical BEV motor + inverter + reduction gear | assumed |
-| eta_regen | 0.65 | fraction | N(0.65, 0.05) | [FAR16] §4; calibrated on five cases in Phase 4 | calibrated |
+| eta_regen | **0.30** (calibrated; prior nominal 0.65) | fraction | N(0.30, 0.05) | [FAR16] §4; calibrated via L-BFGS-B on 12 Autocar India cases (Phase 4) | calibrated |
 | inertia_factor | 1.05 | dimensionless | N(1.05, 0.02) | [G92] Ch. 2; assumed 5% rotational-mass penalty for BEV | assumed |
 | v_wind_mps | 0.0 | m/s | N(0.0, 2.0) | assumed; no meteorological model included | assumed |
-| P_aux_kw | 0.25 | kW | N(0.25, 0.10) | assumed; calibrated on five cases in Phase 4 | calibrated |
+| P_aux_kw | **1.0** (calibrated; prior nominal 0.25) | kW | N(1.0, 0.10) | assumed; calibrated via L-BFGS-B on 12 Autocar India cases (Phase 4) | calibrated |
 | hvac_base_kw | 0.20 | kW | N(0.20, 0.05) | assumed (cabin fan only at comfort temperature 15–28 °C) | assumed |
 | hvac_heat_threshold_c | 15.0 | °C | constant | [YM15] Fig. 4; heating load onset below ~15 °C | assumed |
 | hvac_cool_threshold_c | 28.0 | °C | constant | [YM15] Fig. 4; cooling load onset above ~28 °C | assumed |
@@ -119,6 +119,7 @@ The friction portion adds to inertia_wh_per_km.
 ---
 
 > [!NOTE]
-> This document was last updated to reflect Phase 3 of the RangeIQ development
-> plan. It will be updated after Phase 4 calibration to show the calibrated values
-> of P_aux_kw and eta_regen.
+> Last updated: Phase 8 (cleanup). Calibrated values for `eta_regen` (0.30) and
+> `p_aux_kw` (1.0 kW) were set in Phase 4 via multi-start L-BFGS-B optimisation
+> against 12 Autocar India road-test calibration cases.
+> Validation MAPE after calibration: 9.2% (test set: 9.1%). Spearman ρ = 0.741 (p = 0.001).
